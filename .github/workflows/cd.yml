@@ -25,18 +25,20 @@ jobs:
       - name: Install deps
         run: python -m pip install -r requirements-ci.txt
 
-      # 1️⃣ Load private key to ENV safely
+      # 1️⃣ Load private key into ENV safely (base64 form)
       - name: Load private key into ENV
-        run: echo "PRIVATE_KEY=${{ secrets.SNOWFLAKE_PRIVATE_KEY }}" >> $GITHUB_ENV
+        run: |
+          echo "PRIVATE_KEY=${{ secrets.SNOWFLAKE_PRIVATE_KEY }}" >> $GITHUB_ENV
 
-      # 2️⃣ Write private key file only if secret is present
-      - name: Write private key (if provided)
+      # 2️⃣ Decode private key → private_key.pem
+      - name: Write private key file
         if: env.PRIVATE_KEY != ''
         run: |
-          echo "${PRIVATE_KEY}" | base64 -d > private_key.pem
+          echo "$PRIVATE_KEY" | base64 -d > private_key.pem
           chmod 600 private_key.pem
-          echo "Private key file created."
+          echo "Private key created."
 
+      # 3️⃣ Map branch → schema
       - name: Determine branch & schema
         id: map
         run: |
@@ -52,14 +54,11 @@ jobs:
           elif [ "$BRANCH" = "main" ]; then
             echo "SF_SCHEMA=${{ secrets.SNOWFLAKE_SCHEMA_PROD }}" >> $GITHUB_ENV
           else
-            echo "Unknown branch → using fallback"
-          fi
-
-          if ! grep -q "SF_SCHEMA" $GITHUB_ENV; then
             echo "SF_SCHEMA=${{ secrets.SNOWFLAKE_SCHEMA }}" >> $GITHUB_ENV
           fi
 
-      - name: Preflight dry-run validation (safety)
+      # 4️⃣ Pre-flight dry-run (connects to Snowflake)
+      - name: Preflight dry-run validation
         env:
           SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
           SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
@@ -70,9 +69,10 @@ jobs:
           SNOWFLAKE_PRIVATE_KEY_PASSPHRASE: ${{ secrets.SNOWFLAKE_PRIVATE_KEY_PASSPHRASE }}
           SNOWFLAKE_SCHEMA: ${{ env.SF_SCHEMA }}
         run: |
-          echo "Preflight dry-run against schema ${SNOWFLAKE_SCHEMA}"
+          echo "Dry-run for schema ${SNOWFLAKE_SCHEMA}"
           python tools/deploy.py --dry-run --commit-sha ${GITHUB_SHA}
 
+      # 5️⃣ Actual deployment
       - name: Run deploy script
         env:
           SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
@@ -86,5 +86,5 @@ jobs:
           GITHUB_REF_NAME: ${{ github.ref_name }}
           GITHUB_SHA: ${{ github.sha }}
         run: |
-          echo "Deploying branch ${GITHUB_REF_NAME} -> schema ${SNOWFLAKE_SCHEMA}"
+          echo "Deploying branch ${GITHUB_REF_NAME} → schema ${SNOWFLAKE_SCHEMA}"
           python tools/deploy.py --commit-sha ${GITHUB_SHA}
