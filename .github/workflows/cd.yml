@@ -28,7 +28,7 @@ jobs:
       # Write private key if Base64 exists
       # ---------------------------------------------------
       - name: Load private key from Base64
-        if: ${{ secrets.SNOWFLAKE_PRIVATE_KEY_B64 != '' }}
+        if: secrets.SNOWFLAKE_PRIVATE_KEY_B64
         run: |
           echo "${{ secrets.SNOWFLAKE_PRIVATE_KEY_B64 }}" | base64 -d > private_key.pem
           chmod 600 private_key.pem
