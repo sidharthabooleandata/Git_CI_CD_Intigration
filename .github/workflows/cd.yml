@@ -28,10 +28,13 @@ jobs:
       # Write private key if Base64 exists
       # ---------------------------------------------------
       - name: Load private key from Base64
-        if: secrets.SNOWFLAKE_PRIVATE_KEY_B64
         run: |
-          echo "${{ secrets.SNOWFLAKE_PRIVATE_KEY_B64 }}" | base64 -d > private_key.pem
-          chmod 600 private_key.pem
+          if [ -n "${{ secrets.SNOWFLAKE_PRIVATE_KEY_B64 }}" ]; then
+            echo "${{ secrets.SNOWFLAKE_PRIVATE_KEY_B64 }}" | base64 -d > private_key.pem
+            chmod 600 private_key.pem
+          else
+            echo "No private key provided, skipping."
+          fi
 
       # ---------------------------------------------------
       # Map branch → schema
@@ -50,7 +53,7 @@ jobs:
           fi
 
       # ---------------------------------------------------
-      # Preflight: Dry-run using same auth method
+      # Preflight: Dry-run
       # ---------------------------------------------------
       - name: Preflight dry-run
         env:
