@@ -34,31 +34,58 @@ def get_env(name, default=None):
 # -----------------------------------
 # Load private key (PEM → DER)
 # -----------------------------------
+# -----------------------------------
+# Load private key (PEM or Base64 → DER)
+# -----------------------------------
 def _load_private_key_bytes():
+    """
+    Load private key for Snowflake authentication.
+    Supports:
+      1) File path from SNOWFLAKE_PRIVATE_KEY_FILE
+      2) Base64 from SNOWFLAKE_PRIVATE_KEY or SNOWFLAKE_PRIVATE_KEY_B64
+    Returns DER-encoded key bytes suitable for snowflake.connector.
+    """
+    import base64
     path = os.environ.get("SNOWFLAKE_PRIVATE_KEY_FILE")
-    b64 = os.environ.get("SNOWFLAKE_PRIVATE_KEY")
+    b64_env = os.environ.get("SNOWFLAKE_PRIVATE_KEY_B64") or os.environ.get("SNOWFLAKE_PRIVATE_KEY")
 
     pem = None
     if path and os.path.exists(path):
         with open(path, "rb") as f:
             pem = f.read()
-    elif b64:
-        import base64
-        pem = base64.b64decode(b64)
+        logging.info("Loaded private key from file")
+    elif b64_env:
+        try:
+            pem = base64.b64decode(b64_env)
+            logging.info("Loaded private key from Base64 env variable")
+        except Exception as e:
+            raise RuntimeError(f"Failed to decode Base64 private key: {e}")
 
     if not pem:
+        logging.warning("No private key found in environment or file")
         return None
 
     passphrase = os.environ.get("SNOWFLAKE_PRIVATE_KEY_PASSPHRASE")
-    passphrase = passphrase.encode() if passphrase else None
+    passphrase_bytes = passphrase.encode() if passphrase else None
 
-    key = serialization.load_pem_private_key(pem, password=passphrase, backend=default_backend())
+    try:
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.backends import default_backend
 
-    return key.private_bytes(
-        encoding=serialization.Encoding.DER,
-        format=serialization.PrivateFormat.PKCS8,
-        encryption_algorithm=serialization.NoEncryption()
-    )
+        key = serialization.load_pem_private_key(
+            pem,
+            password=passphrase_bytes,
+            backend=default_backend()
+        )
+
+        der_bytes = key.private_bytes(
+            encoding=serialization.Encoding.DER,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption()
+        )
+        return der_bytes
+    except Exception as e:
+        raise RuntimeError(f"Failed to load private key: {e}")
 
 
 # -----------------------------------
