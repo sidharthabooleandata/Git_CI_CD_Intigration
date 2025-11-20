@@ -1,4 +1,4 @@
-name: CD to Snowflake (branch-aware)
+name: CD to Snowflake
 
 on:
   push:
@@ -11,7 +11,6 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    environment: ${{ github.ref == 'refs/heads/main' && 'prod' || github.ref == 'refs/heads/test' && 'test' || 'dev' }}
 
     steps:
       - name: Checkout
@@ -22,37 +21,38 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install deps
+      - name: Install dependencies
         run: python -m pip install -r requirements-ci.txt
 
-      # Load private key (Base64) into ENV
-      - name: Load Base64 private key to ENV
-        run: echo "PRIVATE_KEY_B64=${{ secrets.SNOWFLAKE_PRIVATE_KEY_B64 }}" >> $GITHUB_ENV
-
-      # Decode only if exists
-      - name: Write private key file (if provided)
-        if: env.PRIVATE_KEY_B64 != ''
+      # ---------------------------------------------------
+      # Write private key if Base64 exists
+      # ---------------------------------------------------
+      - name: Load private key from Base64
+        if: ${{ secrets.SNOWFLAKE_PRIVATE_KEY_B64 != '' }}
         run: |
-          echo "${PRIVATE_KEY_B64}" | base64 -d > private_key.pem
+          echo "${{ secrets.SNOWFLAKE_PRIVATE_KEY_B64 }}" | base64 -d > private_key.pem
           chmod 600 private_key.pem
 
+      # ---------------------------------------------------
+      # Map branch → schema
+      # ---------------------------------------------------
       - name: Determine branch & schema
-        id: map
         run: |
-          set -e
           BRANCH=${GITHUB_REF##*/}
-          echo "BRANCH=${BRANCH}"
-          echo "COMMIT=${GITHUB_SHA}" >> $GITHUB_ENV
+          echo "GITHUB_SHA=${GITHUB_SHA}" >> $GITHUB_ENV
 
           if [ "$BRANCH" = "dev" ]; then
             echo "SF_SCHEMA=${{ secrets.SNOWFLAKE_SCHEMA_DEV }}" >> $GITHUB_ENV
           elif [ "$BRANCH" = "test" ]; then
             echo "SF_SCHEMA=${{ secrets.SNOWFLAKE_SCHEMA_TEST }}" >> $GITHUB_ENV
-          elif [ "$BRANCH" = "main" ]; then
+          else
             echo "SF_SCHEMA=${{ secrets.SNOWFLAKE_SCHEMA_PROD }}" >> $GITHUB_ENV
           fi
 
-      - name: Preflight dry-run validation (safety)
+      # ---------------------------------------------------
+      # Preflight: Dry-run using same auth method
+      # ---------------------------------------------------
+      - name: Preflight dry-run
         env:
           SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
           SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
@@ -63,10 +63,12 @@ jobs:
           SNOWFLAKE_PRIVATE_KEY_PASSPHRASE: ${{ secrets.SNOWFLAKE_PRIVATE_KEY_PASSPHRASE }}
           SNOWFLAKE_SCHEMA: ${{ env.SF_SCHEMA }}
         run: |
-          echo "Preflight dry-run against schema ${SNOWFLAKE_SCHEMA}"
           python tools/deploy.py --dry-run --commit-sha ${GITHUB_SHA}
 
-      - name: Run deploy script
+      # ---------------------------------------------------
+      # Actual deploy
+      # ---------------------------------------------------
+      - name: Deploy to Snowflake
         env:
           SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
           SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
@@ -76,8 +78,5 @@ jobs:
           SNOWFLAKE_PRIVATE_KEY_FILE: private_key.pem
           SNOWFLAKE_PRIVATE_KEY_PASSPHRASE: ${{ secrets.SNOWFLAKE_PRIVATE_KEY_PASSPHRASE }}
           SNOWFLAKE_SCHEMA: ${{ env.SF_SCHEMA }}
-          GITHUB_REF_NAME: ${{ github.ref_name }}
-          GITHUB_SHA: ${{ github.sha }}
         run: |
-          echo "Deploying branch ${GITHUB_REF_NAME} -> schema ${SNOWFLAKE_SCHEMA}"
           python tools/deploy.py --commit-sha ${GITHUB_SHA}
