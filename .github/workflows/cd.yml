@@ -25,12 +25,17 @@ jobs:
       - name: Install deps
         run: python -m pip install -r requirements-ci.txt
 
-      # Write private key file (if secret present)
+      # 1️⃣ Load private key to ENV safely
+      - name: Load private key into ENV
+        run: echo "PRIVATE_KEY=${{ secrets.SNOWFLAKE_PRIVATE_KEY }}" >> $GITHUB_ENV
+
+      # 2️⃣ Write private key file only if secret is present
       - name: Write private key (if provided)
-        if: ${{ secrets.SNOWFLAKE_PRIVATE_KEY != '' }}
+        if: env.PRIVATE_KEY != ''
         run: |
-          echo "${{ secrets.SNOWFLAKE_PRIVATE_KEY }}" | base64 -d > private_key.pem
+          echo "${PRIVATE_KEY}" | base64 -d > private_key.pem
           chmod 600 private_key.pem
+          echo "Private key file created."
 
       - name: Determine branch & schema
         id: map
