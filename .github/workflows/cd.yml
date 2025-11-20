@@ -11,33 +11,52 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+
+    # Map branch to GitHub environment for MFA/approval
     environment: ${{ github.ref == 'refs/heads/main' && 'prod' || github.ref == 'refs/heads/test' && 'test' || 'dev' }}
 
     steps:
+      # -------------------------------
+      # Checkout repo
+      # -------------------------------
       - name: Checkout
         uses: actions/checkout@v3
 
+      # -------------------------------
+      # Setup Python
+      # -------------------------------
       - name: Setup Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.11'
 
-      - name: Install deps
+      # -------------------------------
+      # Install dependencies
+      # -------------------------------
+      - name: Install dependencies
         run: python -m pip install -r requirements-ci.txt
 
-      # Write private key file (if secret present)
-      - name: Write private key (if provided)
-        if: ${{ secrets.SNOWFLAKE_PRIVATE_KEY != '' }}
+      # -------------------------------
+      # Load private key from Base64 (if provided)
+      # -------------------------------
+      - name: Load private key
         run: |
-          echo "${{ secrets.SNOWFLAKE_PRIVATE_KEY }}" | base64 -d > private_key.pem
-          chmod 600 private_key.pem
+          if [ -n "${{ secrets.SNOWFLAKE_PRIVATE_KEY_B64 }}" ]; then
+            echo "${{ secrets.SNOWFLAKE_PRIVATE_KEY_B64 }}" | base64 -d > private_key.pem
+            chmod 600 private_key.pem
+          else
+            echo "No private key provided, skipping."
+          fi
 
-      - name: Determine branch & schema
+      # -------------------------------
+      # Determine branch and schema
+      # -------------------------------
+      - name: Map branch → schema
         id: map
         run: |
           set -e
-          BRANCH=${GITHUB_REF##*/}
-          echo "BRANCH=${BRANCH}"
+          BRANCH=${GITHUB_REF##*/} 
+          echo "Deploying branch: $BRANCH"
           echo "COMMIT=${GITHUB_SHA}" >> $GITHUB_ENV
 
           if [ "$BRANCH" = "dev" ]; then
@@ -47,14 +66,18 @@ jobs:
           elif [ "$BRANCH" = "main" ]; then
             echo "SF_SCHEMA=${{ secrets.SNOWFLAKE_SCHEMA_PROD }}" >> $GITHUB_ENV
           else
-            echo "Unknown branch → using fallback"
+            echo "Unknown branch → using fallback schema"
           fi
 
+          # Fallback schema
           if ! grep -q "SF_SCHEMA" $GITHUB_ENV; then
             echo "SF_SCHEMA=${{ secrets.SNOWFLAKE_SCHEMA }}" >> $GITHUB_ENV
           fi
 
-      - name: Preflight dry-run validation (safety)
+      # -------------------------------
+      # Preflight dry-run (safety check)
+      # -------------------------------
+      - name: Preflight dry-run
         env:
           SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
           SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
@@ -65,10 +88,13 @@ jobs:
           SNOWFLAKE_PRIVATE_KEY_PASSPHRASE: ${{ secrets.SNOWFLAKE_PRIVATE_KEY_PASSPHRASE }}
           SNOWFLAKE_SCHEMA: ${{ env.SF_SCHEMA }}
         run: |
-          echo "Preflight dry-run against schema ${SNOWFLAKE_SCHEMA}"
+          echo "Running preflight dry-run against schema ${SNOWFLAKE_SCHEMA}"
           python tools/deploy.py --dry-run --commit-sha ${GITHUB_SHA}
 
-      - name: Run deploy script
+      # -------------------------------
+      # Actual deployment
+      # -------------------------------
+      - name: Deploy to Snowflake
         env:
           SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
           SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
@@ -81,5 +107,5 @@ jobs:
           GITHUB_REF_NAME: ${{ github.ref_name }}
           GITHUB_SHA: ${{ github.sha }}
         run: |
-          echo "Deploying branch ${GITHUB_REF_NAME} -> schema ${SNOWFLAKE_SCHEMA}"
+          echo "Deploying branch ${GITHUB_REF_NAME} → schema ${SNOWFLAKE_SCHEMA}"
           python tools/deploy.py --commit-sha ${GITHUB_SHA}
