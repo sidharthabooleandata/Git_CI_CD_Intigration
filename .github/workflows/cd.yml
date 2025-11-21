@@ -105,4 +105,4 @@ jobs:
           GITHUB_SHA: ${{ github.sha }}
         run: |
           echo "Deploying branch ${GITHUB_REF_NAME} → schema ${SNOWFLAKE_SCHEMA}"
-          python tools/deploy.py --commit-sha ${GITHUB_SHA}
+          python tools/deploy.py --commit-sha ${GITHUB_SHA}________________________________________
