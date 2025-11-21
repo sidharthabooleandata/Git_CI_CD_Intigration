@@ -16,8 +16,7 @@ logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
 # ENV
 # ------------------------
 def get_env(name, default=None):
-    val = os.environ.get(name, default)
-    return val
+    return os.environ.get(name, default)
 
 # ------------------------
 # Private key loader
@@ -42,7 +41,9 @@ def _load_private_key_bytes():
     if passphrase:
         passphrase = passphrase.encode()
 
-    p_key = serialization.load_pem_private_key(pem_bytes, password=passphrase, backend=default_backend())
+    p_key = serialization.load_pem_private_key(
+        pem_bytes, password=passphrase, backend=default_backend()
+    )
     return p_key.private_bytes(
         encoding=serialization.Encoding.DER,
         format=serialization.PrivateFormat.PKCS8,
@@ -50,17 +51,17 @@ def _load_private_key_bytes():
     )
 
 # ------------------------
-# Connection helpers
+# Connections
 # ------------------------
 def connect_with_password(account, user, password, warehouse, database, schema, role=None):
-    logging.info("Connecting with password auth")
+    logging.info(f"Connecting with password to DB={database} SCHEMA={schema} ROLE={role}")
     return snowflake.connector.connect(
         user=user, password=password, account=account,
         warehouse=warehouse, database=database, schema=schema, role=role
     )
 
 def connect_with_keypair(account, user, private_key_der, warehouse, database, schema, role=None):
-    logging.info("Connecting with keypair auth")
+    logging.info(f"Connecting with keypair to DB={database} SCHEMA={schema} ROLE={role}")
     return snowflake.connector.connect(
         user=user, private_key=private_key_der, account=account,
         warehouse=warehouse, database=database, schema=schema, role=role
@@ -74,10 +75,11 @@ def qualify(db, schema, name):
     return f"{db}.{schema}.{name}"
 
 # ------------------------
-# Deploy log
+# Deploy log tables
 # ------------------------
 def ensure_deploy_log(conn, database, schema):
     fq = qualify(database, schema, "PIPELINE_DEPLOYMENT_LOG")
+    logging.info(f"Ensuring table {fq}")
     cur = conn.cursor()
     try:
         cur.execute(f"""
@@ -97,6 +99,7 @@ def ensure_deploy_log(conn, database, schema):
 
 def ensure_migration_log(conn, database, schema):
     fq = qualify(database, schema, "MIGRATION_LOG")
+    logging.info(f"Ensuring table {fq}")
     cur = conn.cursor()
     try:
         cur.execute(f"""
@@ -122,32 +125,9 @@ def log_deploy(conn, database, schema, deploy_id, branch, commit_sha, start_ts, 
         cur.close()
 
 # ------------------------
-# SQL runners
+# Run SQL
 # ------------------------
-RE_CREATE_TABLE = re.compile(r'create\s+(?:or\s+replace\s+)?table\s+([^\s(;]+)', re.IGNORECASE)
-RE_CREATE_STAGE = re.compile(r'create\s+(?:or\s+replace\s+)?stage\s+([^\s;]+)', re.IGNORECASE)
-RE_COPY_FROM_STAGE = re.compile(r'copy\s+into\s+[^\s]+\s+from\s+@([^\s;]+)', re.IGNORECASE)
-RE_STREAM_ON_TABLE = re.compile(r'create\s+(?:or\s+replace\s+)?stream\s+[^\s]+\s+on\s+table\s+([^\s;]+)', re.IGNORECASE)
-RE_USE_SCHEMA = re.compile(r'^\s*use\s+schema\s+([^\s;]+)', re.IGNORECASE | re.MULTILINE)
-
-def discover_objects_in_sql(sql_text):
-    tables = set(m.group(1).strip().upper() for m in RE_CREATE_TABLE.finditer(sql_text))
-    stages = set(m.group(1).strip().upper() for m in RE_CREATE_STAGE.finditer(sql_text))
-    streams = set(m.group(1).strip().upper() for m in RE_STREAM_ON_TABLE.finditer(sql_text))
-    copy_froms = set(m.group(1).strip().upper() for m in RE_COPY_FROM_STAGE.finditer(sql_text))
-    return {"tables": tables, "stages": stages, "streams": streams, "copy_froms": copy_froms}
-
-def load_existing_objects(conn, database, schema):
-    cur = conn.cursor()
-    tables, stages = set(), set()
-    try:
-        cur.execute("SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA=%s", (schema.upper(),))
-        tables = set(r[0].upper() for r in cur)
-        cur.execute("SELECT STAGE_NAME FROM INFORMATION_SCHEMA.STAGES WHERE STAGE_SCHEMA=%s", (schema.upper(),))
-        stages = set(r[0].upper() for r in cur)
-        return {"tables": tables, "stages": stages}
-    finally:
-        cur.close()
+RE_USE_SCHEMA = re.compile(r'^\s*use\s+schema', re.IGNORECASE|re.MULTILINE)
 
 def run_sql_files(conn, database, schema, sql_glob="sql/*.sql", dry=False):
     ensure_migration_log(conn, database, schema)
@@ -155,16 +135,13 @@ def run_sql_files(conn, database, schema, sql_glob="sql/*.sql", dry=False):
     migration_fq = qualify(database, schema, "MIGRATION_LOG")
 
     try:
-        db_name = conn.database or database
-        cur.execute(f"USE DATABASE {db_name}")
+        logging.info(f"Switching to DATABASE {database}")
+        cur.execute(f"USE DATABASE {database}")
+        logging.info(f"Switching to SCHEMA {schema}")
         cur.execute(f"USE SCHEMA {schema}")
 
-        existing = load_existing_objects(conn, db_name, schema)
-        existing_tables = existing["tables"]
-        existing_stages = existing["stages"]
-
         sql_files = sorted(glob.glob(sql_glob))
-        logging.info("Found %d SQL files", len(sql_files))
+        logging.info(f"Found {len(sql_files)} SQL files")
 
         for path in sql_files:
             file_name = os.path.basename(path)
@@ -172,25 +149,25 @@ def run_sql_files(conn, database, schema, sql_glob="sql/*.sql", dry=False):
 
             cur.execute(f"SELECT 1 FROM {migration_fq} WHERE UPPER(SCRIPT_NAME)=%s", (file_name_upper,))
             if cur.fetchone():
+                logging.info(f"SKIP {file_name}: already applied")
                 continue
 
             with open(path, "r", encoding="utf-8") as fh:
                 sql_text = fh.read()
 
             if RE_USE_SCHEMA.search(sql_text):
-                raise RuntimeError(f"{file_name} contains 'USE SCHEMA'; remove it")
+                raise RuntimeError(f"{file_name} contains 'USE SCHEMA' — remove it.")
 
             if dry:
-                logging.info("[DRY RUN] Would execute %s", file_name)
+                logging.info(f"[DRY RUN] Would APPLY {file_name}")
                 continue
 
+            logging.info(f"APPLYING {file_name}")
             statements = [s.strip() for s in sql_text.split(";") if s.strip()]
             for stmt in statements:
                 cur.execute(stmt)
-                try:
-                    cur.fetchall()
-                except:
-                    pass
+                try: cur.fetchall()
+                except: pass
 
             cur.execute(
                 f"INSERT INTO {migration_fq} (SCRIPT_NAME, APPLIED_AT) VALUES (%s, CURRENT_TIMESTAMP)",
@@ -202,14 +179,15 @@ def run_sql_files(conn, database, schema, sql_glob="sql/*.sql", dry=False):
         cur.close()
 
 # ------------------------
-# Python runners
+# Python scripts
 # ------------------------
 def run_python_scripts(py_glob="python/*.py", dry=False):
     py_files = sorted(glob.glob(py_glob))
     for p in py_files:
         if dry:
-            logging.info("[DRY RUN] Would run %s", p)
+            logging.info(f"[DRY RUN] Would run {p}")
             continue
+        logging.info(f"RUNNING python script {p}")
         rc = subprocess.call([sys.executable, p], env=os.environ.copy())
         if rc != 0:
             raise RuntimeError(f"Python script failed: {p}")
@@ -220,12 +198,10 @@ def run_python_scripts(py_glob="python/*.py", dry=False):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--backup-before", action="store_true")
     parser.add_argument("--commit-sha", default=os.environ.get("GITHUB_SHA", "local"))
     args = parser.parse_args()
 
-    branch = os.environ.get("GITHUB_REF_NAME") or os.environ.get("BRANCH_NAME") or os.environ.get("GITHUB_REF", "local").split("/")[-1]
-
+    branch = os.environ.get("GITHUB_REF_NAME", "local")
     target_schema = os.environ.get("SNOWFLAKE_SCHEMA")
 
     account = get_env("SNOWFLAKE_ACCOUNT")
@@ -233,16 +209,15 @@ def main():
     password = get_env("SNOWFLAKE_PASSWORD")
     warehouse = get_env("SNOWFLAKE_WAREHOUSE")
     database = get_env("SNOWFLAKE_DATABASE")
-    role = get_env("SNOWFLAKE_ROLE")   # ← NOW ACTUALLY POPULATED
+    role = get_env("SNOWFLAKE_ROLE")
 
     deploy_id = f"{branch}-{args.commit_sha[:8]}-{int(time.time())}"
     start_ts = datetime.utcnow()
-    conn = None
 
+    conn = None
     try:
         private_key_der = _load_private_key_bytes()
 
-        # PASSWORD FIRST
         if password:
             try:
                 conn = connect_with_password(account, user, password, warehouse, database, target_schema, role)
@@ -252,36 +227,33 @@ def main():
                 else:
                     raise
         else:
-            if private_key_der:
-                conn = connect_with_keypair(account, user, private_key_der, warehouse, database, target_schema, role)
-            else:
-                logging.error("No auth method available")
-                sys.exit(2)
+            conn = connect_with_keypair(account, user, private_key_der, warehouse, database, target_schema, role)
 
         ensure_deploy_log(conn, database, target_schema)
         run_sql_files(conn, database, target_schema, dry=args.dry_run)
         run_python_scripts(dry=args.dry_run)
 
         end_ts = datetime.utcnow()
-        log_deploy(conn, database, target_schema, deploy_id, branch, args.commit_sha, start_ts, end_ts, "SUCCESS",
+        log_deploy(conn, database, target_schema, deploy_id, branch, args.commit_sha,
+                   start_ts, end_ts, "SUCCESS",
                    "Deployed OK" if not args.dry_run else "Dry-run")
 
-        logging.info("Deployment SUCCESS")
+        logging.info("DEPLOYMENT SUCCESS")
 
     except Exception as e:
         end_ts = datetime.utcnow()
         if conn:
             try:
-                log_deploy(conn, database, target_schema, deploy_id, branch, args.commit_sha, start_ts, end_ts, "FAILED", str(e)[:1000])
+                log_deploy(conn, database, target_schema, deploy_id, branch, args.commit_sha,
+                           start_ts, end_ts, "FAILED", str(e))
             except:
                 logging.exception("Failed writing failure log")
-        logging.exception("Deployment failed: %s", e)
+        logging.exception("DEPLOY FAILED")
         sys.exit(3)
 
     finally:
         if conn:
             conn.close()
 
-
 if __name__ == "__main__":
-    main()________________________________________
+    main()
